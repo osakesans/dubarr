@@ -123,7 +123,7 @@ def make_handler(engine):
         def _page(self, title, active, body):
             cfg = config.load()
             nav = "".join(f'<a href="{h}" class="{"on" if active == h else ""}">{n}</a>'
-                          for h, n in [("/", "Overview"), ("/titles", "Titles"), ("/rules", "Rules"),
+                          for h, n in [("/", "Overview"), ("/titles", "Titles"), ("/rules", "Rules"), ("/audio", "Audio"),
                                        ("/log", "Log"), ("/settings", "Settings")])
             banner = ""
             if not engine.configured(cfg):
@@ -169,6 +169,8 @@ def make_handler(engine):
                     return self._titles(q)
                 if path == "/rules":
                     return self._rules(method, cfg)
+                if path == "/audio":
+                    return self._audio(q.get("status", "planned"))
                 if path == "/log":
                     return self._log(q.get("level"))
                 if path == "/settings":
@@ -223,6 +225,9 @@ def make_handler(engine):
                     "changes_24h": store.count_log_since("action", day),
                     "profile_switches_24h": store.count_log_since("action", day, "move %"),
                     "language_fixes_24h": store.count_log_since("action", day, "set file language%"),
+                    "default_audio_changed_24h": store.count_log_since("action", day, "set default audio%"),
+                    "default_audio_pending": (s.get("audio") or {}).get("planned", 0),
+                    "audio": s.get("audio") or {},
                     "apps": apps}
 
         def _overview(self):
@@ -233,6 +238,7 @@ def make_handler(engine):
                 ("file languages to fix", st["language_fixes_pending"]),
                 ("upgrade candidates", st["upgrade_candidates"]),
                 ("format changes pending", st["format_changes_pending"]),
+                ("default audio to set", st["default_audio_pending"]),
                 ("changes 24 h", st["changes_24h"])])
             kinds = "".join(f'<tr><td>{E(app.capitalize())}</td><td>{a["titles"]}</td><td>'
                             + ", ".join(f'{E(k)} {n}' for k, n in sorted(a["kinds"].items())) + "</td></tr>"
@@ -354,6 +360,23 @@ Releases in none of the listed languages are rejected.</p>
 <div class="card" style="margin-top:16px"><b>Pending changes to formats and profiles</b>
 <ul>{fplan or '<li class="muted">none</li>'}</ul></div>""")
 
+        def _audio(self, status):
+            a = (engine.summary or {}).get("audio") or {}
+            names = [("planned", "would change (dry run)"), ("changed", "changed"), ("seeding", "skipped: seeding"),
+                     ("read-only", "skipped: read-only"), ("no match", "no wanted language"),
+                     ("ok", "already right"), ("error", "errors")]
+            nav = " · ".join(f'<a href="/audio?status={urllib.parse.quote(k)}">{n} ({a.get(k, 0)})</a>' for k, n in names)
+            rows = "".join(f'<tr><td>{E(r["path"].rsplit("/", 1)[-1])}</td><td><code>{E(r["detail"])}</code></td>'
+                           f'<td class="muted">{_ago(r["ts"])}</td></tr>' for r in store.audio_rows(status))
+            return self._page("Audio", "/audio", f"""<div class="card"><b>Default audio track</b>
+<p class="muted">Dubarr marks the audio track in the best language of the title's kind as the default in MKV files,
+so Plex starts with it for users who have not chosen a language themselves. Only the file header changes.
+Files that are still seeding (more than one hard link), read-only files and MP4 files are left alone.
+Seeding files are checked again later. <code>*</code> marks the default track.</p>
+<p>{a.get('checked', 0)} of {a.get('mkv_files', 0)} MKV files checked.</p><p>{nav}</p></div>
+<div class="card"><table><tr><th>File</th><th>Audio tracks</th><th>Checked</th></tr>
+{rows or '<tr><td colspan=3 class=muted>none</td></tr>'}</table></div>""")
+
         def _log(self, level):
             levels = ["", "action", "plan", "warning", "error", "info"]
             nav = " · ".join(f'<a href="/log?level={l}">{l or "all"}</a>' for l in levels)
@@ -387,14 +410,18 @@ Releases in none of the listed languages are rejected.</p>
                     cfg[svc]["url"] = f.get(f"{svc}.url", "").strip()
                     if f.get(f"{svc}.api_key", "").strip():
                         cfg[svc]["api_key"] = f[f"{svc}.api_key"].strip()
+                cfg["plex"]["url"] = f.get("plex.url", "").strip()
+                if f.get("plex.token", "").strip():
+                    cfg["plex"]["token"] = f["plex.token"].strip()
+                cfg["plex"]["verify_ssl"] = "plex.verify_ssl" in f
                 for k in ("upgrade_searches_per_night", "upgrade_retry_days", "upgrade_hour",
-                          "sync_interval_minutes"):
+                          "sync_interval_minutes", "audio_files_per_run"):
                     if f.get(k, "").strip().isdigit():
                         cfg[k] = int(f[k])
                 if f.get("reject_score", "").strip().lstrip("-").isdigit():
                     cfg["reject_score"] = int(f["reject_score"])
                 cfg["nextarr_url"] = f.get("nextarr_url", "").strip()
-                for k in ("dry_run", "manage_formats", "switch_profiles", "fix_file_languages",
+                for k in ("dry_run", "manage_formats", "switch_profiles", "fix_file_languages", "set_default_audio",
                           "search_new_movies", "search_new_series"):
                     cfg[k] = k in f
                 cfg["auth"]["enabled"] = "auth.enabled" in f
@@ -431,6 +458,8 @@ Releases in none of the listed languages are rejected.</p>
 {box('manage_formats', c['manage_formats'], 'Create language custom formats and set their scores in the profiles')}
 {box('switch_profiles', c['switch_profiles'], 'Move titles to the profile of their kind')}
 {box('fix_file_languages', c['fix_file_languages'], "Set a file's languages from its real audio tracks")}
+{box('set_default_audio', c['set_default_audio'], 'Mark the best audio track as default in MKV files (needs the media folder mounted read-write)')}
+{txt('audio_files_per_run', c['audio_files_per_run'], 'MKV files read per sync', 'number')}
 {box('search_new_movies', c['search_new_movies'], 'Search new movies in Radarr (when Overseerr does not search)')}
 {box('search_new_series', c['search_new_series'], 'Search new series in Sonarr')}
 {txt('nextarr_url', c['nextarr_url'], 'Optional. While Nextarr runs live, it decides which episodes are searched.')}
@@ -440,7 +469,9 @@ Releases in none of the listed languages are rejected.</p>
 {txt('upgrade_retry_days', c['upgrade_retry_days'], 'Search the same item again after this many days', 'number')}
 {txt('upgrade_hour', c['upgrade_hour'], 'Hour of the nightly upgrade search (0-23)', 'number')}
 {txt('sync_interval_minutes', c['sync_interval_minutes'], '', 'number')}</fieldset></div>
-<div class="card">{svc}</div>
+<div class="card">{svc}<fieldset><legend>Plex (optional)</legend>{txt('plex.url', c['plex']['url'], 'Refreshes the folder in Plex after a default audio change, e.g. https://plex:32400')}
+<label>Token</label><input type="password" name="plex.token" placeholder="{'stored, leave empty to keep' if c['plex']['token'] else 'not set'}">
+{box('plex.verify_ssl', c['plex'].get('verify_ssl', False), 'Verify the Plex certificate')}</fieldset></div>
 <div class="card"><fieldset><legend>Login</legend>{box('auth.enabled', c['auth']['enabled'], 'Require login for the web UI')}
 {txt('auth.username', c['auth']['username'])}
 <label>Password</label><input type="password" name="auth.password" placeholder="{'stored, leave empty to keep' if c['auth']['password_hash'] else 'not set'}">

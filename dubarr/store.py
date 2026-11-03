@@ -23,6 +23,8 @@ def db():
         CREATE TABLE IF NOT EXISTS searches(app TEXT, item_id INTEGER, ts REAL, PRIMARY KEY(app, item_id));
         CREATE TABLE IF NOT EXISTS seen(app TEXT, item_id INTEGER, PRIMARY KEY(app, item_id));
         CREATE TABLE IF NOT EXISTS kv(key TEXT PRIMARY KEY, value TEXT);
+        CREATE TABLE IF NOT EXISTS audio(path TEXT PRIMARY KEY, mtime REAL, size INTEGER, status TEXT,
+            detail TEXT, ts REAL);
         """)
     return _conn
 
@@ -84,3 +86,27 @@ def mark_seen(app, ids):
     with _lock:
         db().executemany("INSERT OR IGNORE INTO seen VALUES(?,?)", [(app, i) for i in ids])
         db().commit()
+
+
+def audio_state(path):
+    with _lock:
+        r = db().execute("SELECT mtime, size, status, detail FROM audio WHERE path=?", (path,)).fetchone()
+        return dict(r) if r else None
+
+
+def set_audio_state(path, mtime, size, status, detail=""):
+    with _lock:
+        db().execute("INSERT OR REPLACE INTO audio VALUES(?,?,?,?,?,?)",
+                     (path, mtime, size, status, detail, time.time()))
+        db().commit()
+
+
+def audio_counts():
+    with _lock:
+        return {r[0]: r[1] for r in db().execute("SELECT status, COUNT(*) FROM audio GROUP BY status")}
+
+
+def audio_rows(status, limit=500):
+    with _lock:
+        return [dict(r) for r in db().execute(
+            "SELECT * FROM audio WHERE status=? ORDER BY ts DESC LIMIT ?", (status, limit))]

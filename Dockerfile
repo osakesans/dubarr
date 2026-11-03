@@ -8,6 +8,9 @@ LABEL org.opencontainers.image.title="Dubarr" \
       com.centurylinklabs.watchtower.enable="false"
 
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 DUBARR_CONFIG_DIR=/config DUBARR_PORT=8791
+# mkvtoolnix edits the default audio flag in MKV headers (nothing is re-encoded)
+RUN apt-get update && apt-get install -y --no-install-recommends mkvtoolnix \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY dubarr /app/dubarr
 RUN useradd --uid 1000 --create-home dubarr && mkdir -p /config && chown dubarr /config

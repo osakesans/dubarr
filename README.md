@@ -11,6 +11,8 @@ downloaded in the right audio language.
 - Reads the **real audio tracks** of every file and fixes the file's languages when they are
   tagged wrong, so upgrades continue when a "Nordic" release has no Danish audio, and stop
   when a file already has it.
+- Marks the **best audio track as default** in MKV files, so Plex starts with the right language
+  for users who have not picked one (for example English instead of Japanese on a dubbed anime).
 - Searches **new movies and series** after their profile is right (useful when Overseerr is
   set not to search).
 - Searches **upgrades in small nightly batches**, so your disks and indexers are not flooded.
@@ -54,11 +56,34 @@ Dubarr compares the tags with the audio tracks Sonarr/Radarr read from the file 
 When they disagree on a language that matters for the title's kind, the file's languages are set
 to its audio tracks. Files with unknown or untagged tracks are left alone.
 
+## Default audio track
+
+Players such as Plex start with the audio track the file marks as *default*, unless the user has
+chosen a preferred language in their account settings (that setting wins when the file has that
+language). Many releases mark the wrong track: a foreign dub on an English series, Japanese on a
+dubbed anime, or every track at once.
+
+Dubarr reads the audio tracks of each MKV file (`mkvmerge -J`) and marks the track in the first of
+the kind's languages that the file has as default, and unmarks the others. Commentary and
+audio-description tracks are never chosen. Only the header is edited with `mkvpropedit`; nothing
+is re-encoded. Each file is read once and again only when it changes. Set a Plex URL and token to
+let Dubarr refresh the folder in Plex after a change.
+
+Files are **left alone** when:
+
+- they have more than one hard link — a torrent client is probably still seeding them, and editing
+  the file would break the torrent (they are checked again later),
+- they cannot be written, or are not MKV (MP4 is not supported),
+- none of the kind's languages is in them.
+
+This needs the media folder mounted read-write at the **same path as in Sonarr/Radarr**, for example
+`- /srv/media:/data/media`. Without the mount, turn the feature off under Settings.
+
 ## Safety
 
 - **Dry run** by default. The *Titles* and *Rules* pages and the log show what would change.
-- Dubarr never deletes or renames files. It changes profiles, custom formats, file language tags,
-  and starts searches.
+- Dubarr never deletes, renames or re-encodes files. It changes profiles, custom formats, file
+  language tags and the default flag of audio tracks in MKV headers, and starts searches.
 - Upgrade searches are limited per night (10 per app by default), and the same item is not
   searched again for 14 days.
 - A file named `PAUSE` in the config folder stops all activity.
@@ -76,7 +101,7 @@ mkdir -p dubarr/config && sudo chown 1000:1000 dubarr/config   # the container r
 ```yaml
 services:
   dubarr:
-    image: ghcr.io/osakesans/dubarr:0.1.0
+    image: ghcr.io/osakesans/dubarr:0.2.0
     container_name: dubarr
     restart: unless-stopped
     user: "1000:1000"
@@ -84,6 +109,7 @@ services:
       - TZ=Etc/UTC   # your time zone, used for the nightly upgrade hour
     volumes:
       - ./config:/config
+      - /srv/media:/data/media   # your media, same path as in Sonarr/Radarr (for default audio)
     ports:
       - "8791:8791"
     labels:

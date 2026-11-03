@@ -45,6 +45,9 @@ DEFAULTS = {
     "manage_formats": True,       # create Dubarr's custom formats and set profile scores
     "switch_profiles": True,      # move titles to the profile of their kind
     "fix_file_languages": True,   # set a file's languages from its real audio tracks
+    "set_default_audio": True,    # mark the best audio track as default in MKV files (for Plex)
+    "audio_files_per_run": 300,   # MKV files read per sync; each is read again only when it changes
+    "plex": {"url": "", "token": "", "verify_ssl": False},  # optional: refresh Plex after a change
     "search_new_movies": True,    # search new Radarr movies (when Overseerr does not)
     "search_new_series": True,    # search new Sonarr series; turn off when Nextarr decides
     "nextarr_url": "",            # if set and Nextarr is live, new series are left to Nextarr

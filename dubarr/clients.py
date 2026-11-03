@@ -1,5 +1,6 @@
 """Small HTTP client for Sonarr and Radarr (stdlib only)."""
 import json
+import ssl
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -11,7 +12,7 @@ class ApiError(Exception):
     pass
 
 
-def _request(method, url, headers=None, body=None, timeout=60):
+def _request(method, url, headers=None, body=None, timeout=60, verify=True):
     data = json.dumps(body).encode() if body is not None else None
     h = {"Accept": "application/json", "User-Agent": UA}
     if data is not None:
@@ -19,7 +20,8 @@ def _request(method, url, headers=None, body=None, timeout=60):
     h.update(headers or {})
     req = urllib.request.Request(url, data=data, method=method, headers=h)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        ctx = None if verify or not url.startswith("https") else ssl._create_unverified_context()
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
             raw = r.read()
             return json.loads(raw) if raw else None
     except urllib.error.HTTPError as e:
@@ -71,3 +73,24 @@ class Arr:
     def search_episodes(self, ids):
         if ids:
             self.send("POST", "/command", {"name": "EpisodeSearch", "episodeIds": list(ids)})
+
+
+class Plex:
+    def __init__(self, url, token, verify_ssl=True):
+        self.base = url.rstrip("/")
+        self.h = {"X-Plex-Token": token}
+        self.verify = verify_ssl
+
+    def sections(self):
+        r = _request("GET", self.base + "/library/sections", self.h, verify=self.verify) or {}
+        return [(d["key"], [loc["path"] for loc in d.get("Location", [])])
+                for d in r.get("MediaContainer", {}).get("Directory", [])]
+
+    def refresh_path(self, path):
+        """Partial scan of one folder, so Plex reads the changed file again."""
+        for key, locs in self.sections():
+            if any(path == l or path.startswith(l.rstrip("/") + "/") for l in locs):
+                _request("GET", f"{self.base}/library/sections/{key}/refresh?"
+                         + urllib.parse.urlencode({"path": path}), self.h, verify=self.verify)
+                return True
+        return False

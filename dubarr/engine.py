@@ -1,10 +1,12 @@
 """Dubarr engine: classify titles, keep language formats and profiles in shape, fix file languages
 from real audio tracks, search new titles, and search upgrades in small nightly batches."""
+import hashlib
+import json
 import re
 import threading
 import time
 
-from . import clients, config, store
+from . import audio, clients, config, store
 
 PREFIX = "Dubarr: "
 ORIGINAL_ID = -2
@@ -289,7 +291,7 @@ class Engine:
                    "managed": t["qualityProfileId"] in managed, "scored": t["qualityProfileId"] in scored,
                    "switch": bool(target and t["qualityProfileId"] in managed and t["qualityProfileId"] != target),
                    "monitored": t.get("monitored", False), "fixes": [], "upgrades": [],
-                   "files": 0, "audio": "", "tags": "", "score": None, "missing": False,
+                   "files": 0, "audio": "", "tags": "", "score": None, "missing": False, "media": [],
                    "original": (t.get("originalLanguage") or {}).get("name")}
             rows.append((t, kind, row))
         # files
@@ -305,6 +307,7 @@ class Engine:
                 if not f or not kind or not row["scored"]:
                     continue
                 row["files"] = 1
+                row["media"].append({"path": f.get("path") or "", "label": t["title"]})
                 row["audio"] = (f.get("mediaInfo") or {}).get("audioLanguages", "")
                 row["tags"] = ", ".join(l["name"] for l in f.get("languages") or [])
                 row["score"] = f.get("customFormatScore")
@@ -326,6 +329,7 @@ class Engine:
                     row["files"] += 1
                     e = eps.get(f["id"])
                     label = f"S{e['seasonNumber']:02d}E{e['episodeNumber']:02d}" if e else f.get("relativePath", "")
+                    row["media"].append({"path": f.get("path") or "", "label": f"{t['title']} {label}"})
                     fix = self._file_fix(kind, t, f, lang_ids)
                     if fix:
                         row["fixes"].append({"file_id": f["id"], "label": label, "to": fix,
@@ -360,6 +364,7 @@ class Engine:
         dry = cfg["dry_run"]
         live_nextarr = self.nextarr_live(cfg)
         summary = {"last_sync": time.time(), "dry_run": dry, "nextarr_live": live_nextarr, "apps": {}}
+        all_rows = []
         for app, arr in self._clients(cfg).items():
             if cfg["manage_formats"]:
                 fchanges = self._sync_formats(cfg, arr, dry)
@@ -369,6 +374,7 @@ class Engine:
             rows = self._plan_app(cfg, arr, dry, live_nextarr)
             self._act(cfg, arr, rows, dry, live_nextarr)
             self.plans[app] = [r for _, _, r in rows]
+            all_rows += [(t, kind, r) for t, kind, r in rows if kind and r["scored"]]
             kinds = {}
             for _, _, r in rows:
                 kinds[r["kind"]] = kinds.get(r["kind"], 0) + 1
@@ -379,6 +385,8 @@ class Engine:
                 "fixes": sum(len(r["fixes"]) for _, _, r in rows),
                 "upgrades": sum(len(r["upgrades"]) for _, _, r in rows),
                 "format_changes": len(self.format_plan[app]) if cfg["manage_formats"] else 0}
+        if cfg["set_default_audio"]:
+            summary["audio"] = self._default_audio(cfg, dry, all_rows)
         self.summary = summary
         store.kv_set("heartbeat", time.time())
 
@@ -428,6 +436,42 @@ class Engine:
                     arr.search_titles([r["id"]])
         if not dry:
             store.mark_seen(app, [r["id"] for r in new])
+
+    # ---------- default audio track ----------
+    def _default_audio(self, cfg, dry, rows):
+        if not audio.TOOLS:
+            return {"error": "mkvtoolnix not found"}
+        # Rules changed: look at every file again.
+        fp = hashlib.sha1(json.dumps(cfg["kinds"], sort_keys=True).encode()).hexdigest()
+        if store.kv_get("audio_rules") != fp:
+            with store._lock:
+                store.db().execute("DELETE FROM audio WHERE status IN ('ok','no match','planned')")
+                store.db().commit()
+            store.kv_set("audio_rules", fp)
+        items = []
+        for t, kind, r in rows:
+            wanted = []
+            for tok in kind["languages"]:
+                if token_kind(tok) != "lang":
+                    continue
+                name = r["original"] if tok.lower() == "original" else tok
+                if name:
+                    wanted.append(audio.language_codes(name, ISO))
+            for m in r["media"]:
+                if m["path"]:
+                    items.append(dict(m, wanted=wanted))
+        dirs, read = audio.run(items, ISO, dry, int(cfg["audio_files_per_run"]),
+                               lambda msg: self._say(dry, "audio:" + msg, msg))
+        if dirs and cfg["plex"]["url"] and cfg["plex"]["token"]:
+            plex = clients.Plex(cfg["plex"]["url"], cfg["plex"]["token"], cfg["plex"].get("verify_ssl", False))
+            for d in sorted(dirs):
+                try:
+                    plex.refresh_path(d)
+                except clients.ApiError as e:
+                    store.log(f"Plex refresh of {d} failed: {e}", "warning")
+        counts = store.audio_counts()
+        mkv = sum(1 for i in items if i["path"].lower().endswith(".mkv"))
+        return {"mkv_files": mkv, "checked": sum(counts.values()), "read_this_run": read, **counts}
 
     # ---------- webhooks: a title was just added ----------
     def title_added(self, app, title_id):
