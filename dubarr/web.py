@@ -421,6 +421,7 @@ Seeding files are checked again later. <code>*</code> marks the default track.</
                 if f.get("reject_score", "").strip().lstrip("-").isdigit():
                     cfg["reject_score"] = int(f["reject_score"])
                 cfg["nextarr_url"] = f.get("nextarr_url", "").strip()
+                cfg["torrent_folders"] = [x.strip() for x in f.get("torrent_folders", "").split(",") if x.strip()]
                 for k in ("dry_run", "manage_formats", "switch_profiles", "fix_file_languages", "set_default_audio",
                           "search_new_movies", "search_new_series"):
                     cfg[k] = k in f
@@ -460,6 +461,7 @@ Seeding files are checked again later. <code>*</code> marks the default track.</
 {box('fix_file_languages', c['fix_file_languages'], "Set a file's languages from its real audio tracks")}
 {box('set_default_audio', c['set_default_audio'], 'Mark the best audio track as default in MKV files (needs the media folder mounted read-write)')}
 {txt('audio_files_per_run', c['audio_files_per_run'], 'MKV files read per sync', 'number')}
+{txt('torrent_folders', ', '.join(c.get('torrent_folders') or []), "Your torrent client's download folders, comma separated, as Dubarr sees them. Files hard-linked to them are never edited.")}
 {box('search_new_movies', c['search_new_movies'], 'Search new movies in Radarr (when Overseerr does not search)')}
 {box('search_new_series', c['search_new_series'], 'Search new series in Sonarr')}
 {txt('nextarr_url', c['nextarr_url'], 'Optional. While Nextarr runs live, it decides which episodes are searched.')}

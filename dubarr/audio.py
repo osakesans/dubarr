@@ -74,7 +74,22 @@ def describe(tracks, idx=None):
                       for i, t in enumerate(tracks))
 
 
-def run(items, iso, dry, limit, say):
+def seeding_inodes(folders):
+    """Inodes of the files in the torrent client's folders: a library file with one of them is a
+    hard link to a torrent, also when the file system reports a link count of 1 (some NFS setups)."""
+    out = set()
+    for root in folders:
+        for d, _, fs in os.walk(root):
+            for f in fs:
+                try:
+                    st = os.stat(os.path.join(d, f))
+                except OSError:
+                    continue
+                out.add((st.st_dev, st.st_ino))
+    return out
+
+
+def run(items, iso, dry, limit, say, seeding=frozenset()):
     """items: [{'path', 'label', 'wanted': [codes, ...]}]. Returns (folders changed, files read)."""
     changed_dirs, read = set(), 0
     for it in items:
@@ -105,7 +120,7 @@ def run(items, iso, dry, limit, say):
                                   "ok" if idx is not None else "no match", describe(tracks))
             continue
         detail = f"{describe(tracks)} → {describe(tracks, idx)}"
-        if st.st_nlink > 1:
+        if st.st_nlink > 1 or (st.st_dev, st.st_ino) in seeding:
             store.set_audio_state(path, st.st_mtime, st.st_size, "seeding", detail)
             continue
         if not os.access(path, os.W_OK):

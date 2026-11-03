@@ -460,8 +460,9 @@ class Engine:
             for m in r["media"]:
                 if m["path"]:
                     items.append(dict(m, wanted=wanted))
+        seeding = audio.seeding_inodes([p for p in cfg.get("torrent_folders") or [] if p])
         dirs, read = audio.run(items, ISO, dry, int(cfg["audio_files_per_run"]),
-                               lambda msg: self._say(dry, "audio:" + msg, msg))
+                               lambda msg: self._say(dry, "audio:" + msg, msg), seeding)
         if dirs and cfg["plex"]["url"] and cfg["plex"]["token"]:
             plex = clients.Plex(cfg["plex"]["url"], cfg["plex"]["token"], cfg["plex"].get("verify_ssl", False))
             for d in sorted(dirs):

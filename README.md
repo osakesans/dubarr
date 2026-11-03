@@ -71,8 +71,10 @@ let Dubarr refresh the folder in Plex after a change.
 
 Files are **left alone** when:
 
-- they have more than one hard link — a torrent client is probably still seeding them, and editing
-  the file would break the torrent (they are checked again later),
+- they have more than one hard link, or the same inode as a file in one of your **torrent folders**
+  (Settings) — the torrent client is still seeding them, and editing the file would break the
+  torrent (they are checked again later). Set the torrent folders: some NFS servers report a link
+  count of 1 for hard-linked files,
 - they cannot be written, or are not MKV (MP4 is not supported),
 - none of the kind's languages is in them.
 
@@ -101,7 +103,7 @@ mkdir -p dubarr/config && sudo chown 1000:1000 dubarr/config   # the container r
 ```yaml
 services:
   dubarr:
-    image: ghcr.io/osakesans/dubarr:0.2.0
+    image: ghcr.io/osakesans/dubarr:0.2.1
     container_name: dubarr
     restart: unless-stopped
     user: "1000:1000"

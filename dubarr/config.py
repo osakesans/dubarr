@@ -46,7 +46,8 @@ DEFAULTS = {
     "switch_profiles": True,      # move titles to the profile of their kind
     "fix_file_languages": True,   # set a file's languages from its real audio tracks
     "set_default_audio": True,    # mark the best audio track as default in MKV files (for Plex)
-    "audio_files_per_run": 300,   # MKV files read per sync; each is read again only when it changes
+    "audio_files_per_run": 300,
+    "torrent_folders": [],        # where your torrent client keeps files; hard links to them are never edited   # MKV files read per sync; each is read again only when it changes
     "plex": {"url": "", "token": "", "verify_ssl": False},  # optional: refresh Plex after a change
     "search_new_movies": True,    # search new Radarr movies (when Overseerr does not)
     "search_new_series": True,    # search new Sonarr series; turn off when Nextarr decides
