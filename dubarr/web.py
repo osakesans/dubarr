@@ -107,6 +107,20 @@ def make_handler(engine):
         def _form(self):
             return {k: v[-1] for k, v in urllib.parse.parse_qs(self._body().decode(), keep_blank_values=True).items()}
 
+        def _same_origin(self):
+            """Forms must come from Dubarr's own pages: a page on another site cannot post them.
+
+            Browsers send Origin (or at least Referer) with a form POST. Clients that send neither,
+            like curl, are not browsers being tricked, so they pass.
+            """
+            src = self.headers.get("Origin") or self.headers.get("Referer") or ""
+            if not src or src == "null":
+                return src != "null"
+            host = urllib.parse.urlsplit(src).netloc.lower()
+            mine = {(self.headers.get("Host") or "").lower(),
+                    (self.headers.get("X-Forwarded-Host") or "").split(",")[0].strip().lower()}
+            return host in mine - {""}
+
         def _authed(self, cfg):
             a = cfg["auth"]
             if not a.get("enabled") or not a.get("password_hash"):
@@ -159,6 +173,8 @@ def make_handler(engine):
                     return self._json({"ok": ok, "heartbeat": hb}, 200 if ok else 503)
                 if path.startswith("/webhook/"):
                     return self._webhook(method, path, q, cfg)
+                if method == "POST" and not self._same_origin():
+                    return self._send(403, "This form was sent from another site. Nothing was done.")
                 if path == "/api/status":
                     return self._json(self._status())
                 if not self._authed(cfg):
@@ -363,6 +379,7 @@ Releases in none of the listed languages are rejected.</p>
         def _audio(self, status):
             a = (engine.summary or {}).get("audio") or {}
             names = [("planned", "would change (dry run)"), ("changed", "changed"), ("seeding", "skipped: seeding"),
+                     ("playing", "waiting: being played"),
                      ("read-only", "skipped: read-only"), ("no match", "no wanted language"),
                      ("ok", "already right"), ("error", "errors")]
             nav = " · ".join(f'<a href="/audio?status={urllib.parse.quote(k)}">{n} ({a.get(k, 0)})</a>' for k, n in names)
@@ -372,7 +389,7 @@ Releases in none of the listed languages are rejected.</p>
 <p class="muted">Dubarr marks the audio track in the best language of the title's kind as the default in MKV files,
 so Plex starts with it for users who have not chosen a language themselves. Only the file header changes.
 Files that are still seeding (more than one hard link), read-only files and MP4 files are left alone.
-Seeding files are checked again later. <code>*</code> marks the default track.</p>
+A file that is being played in Plex waits until it is not. Seeding files are checked again later. <code>*</code> marks the default track.</p>
 <p>{a.get('checked', 0)} of {a.get('mkv_files', 0)} MKV files checked.</p><p>{nav}</p></div>
 <div class="card"><table><tr><th>File</th><th>Audio tracks</th><th>Checked</th></tr>
 {rows or '<tr><td colspan=3 class=muted>none</td></tr>'}</table></div>""")

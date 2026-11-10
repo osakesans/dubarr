@@ -75,6 +75,8 @@ Files are **left alone** when:
   (Settings) — the torrent client is still seeding them, and editing the file would break the
   torrent (they are checked again later). Set the torrent folders: some NFS servers report a link
   count of 1 for hard-linked files,
+- Plex is playing them, also on pause (needs the Plex URL and token; they are checked again later).
+  If Plex cannot be asked, no file is edited in that sync,
 - they cannot be written, or are not MKV (MP4 is not supported),
 - none of the kind's languages is in them.
 

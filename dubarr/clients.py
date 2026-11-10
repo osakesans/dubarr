@@ -1,11 +1,14 @@
 """Small HTTP client for Sonarr and Radarr (stdlib only)."""
 import json
+import os
 import ssl
 import urllib.error
 import urllib.parse
 import urllib.request
 
-UA = "Dubarr/0.1 (+https://github.com/osakesans/dubarr)"
+from . import __version__
+
+UA = f"Dubarr/{__version__} (+https://github.com/osakesans/dubarr)"
 
 
 class ApiError(Exception):
@@ -85,6 +88,13 @@ class Plex:
         r = _request("GET", self.base + "/library/sections", self.h, verify=self.verify) or {}
         return [(d["key"], [loc["path"] for loc in d.get("Location", [])])
                 for d in r.get("MediaContainer", {}).get("Directory", [])]
+
+    def playing_files(self):
+        """File names (without folder) that Plex is playing right now."""
+        r = _request("GET", self.base + "/status/sessions", self.h, timeout=20, verify=self.verify) or {}
+        return {os.path.basename(part.get("file") or "")
+                for m in r.get("MediaContainer", {}).get("Metadata", [])
+                for media in m.get("Media", []) for part in media.get("Part", [])} - {""}
 
     def refresh_path(self, path):
         """Partial scan of one folder, so Plex reads the changed file again."""

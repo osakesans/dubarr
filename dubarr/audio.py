@@ -3,7 +3,8 @@ Plex start with the right language for users who have not chosen one themselves.
 
 Only the MKV header is edited (mkvpropedit), nothing is re-encoded. A file is skipped when it has
 more than one hard link (a torrent client is probably still seeding it: editing it would break
-the torrent), when it cannot be written, or when none of the kind's languages is in it."""
+the torrent), when it is being played, when it cannot be written, or when none of the kind's
+languages is in it."""
 import json
 import os
 import shutil
@@ -89,9 +90,26 @@ def seeding_inodes(folders):
     return out
 
 
-def run(items, iso, dry, limit, say, seeding=frozenset()):
-    """items: [{'path', 'label', 'wanted': [codes, ...]}]. Returns (folders changed, files read)."""
+class _Lazy:
+    """A value that is only worked out the first time it is needed."""
+
+    def __init__(self, fn):
+        self._fn, self._value, self._done = fn, None, False
+
+    def get(self):
+        if not self._done:
+            self._value, self._done = self._fn(), True
+        return self._value
+
+
+def run(items, iso, dry, limit, say, seeding=lambda: frozenset(), playing=lambda: frozenset()):
+    """items: [{'path', 'label', 'wanted': [codes, ...]}]. Returns (folders changed, files read).
+
+    seeding() gives the inodes in the torrent folders, playing() the names of the files that are
+    being played. Both are only asked when a file really needs a change, which is rare."""
     changed_dirs, read = set(), 0
+    states = store.audio_states()
+    seeding, playing = _Lazy(seeding), _Lazy(playing)
     for it in items:
         path = it["path"]
         if not path.lower().endswith(".mkv"):
@@ -100,10 +118,10 @@ def run(items, iso, dry, limit, say, seeding=frozenset()):
             st = os.stat(path)
         except OSError:
             continue
-        prev = store.audio_state(path)
+        prev = states.get(path)
         if prev and prev["mtime"] == st.st_mtime and prev["size"] == st.st_size \
-                and prev["status"] not in ("planned", "seeding"):
-            continue  # unchanged since we looked (seeding files are looked at again)
+                and prev["status"] not in ("planned", "seeding", "playing"):
+            continue  # unchanged since we looked (seeding and playing files are looked at again)
         if prev and prev["status"] == "planned" and dry:
             continue  # already listed in the dry-run plan
         if read >= limit:
@@ -120,7 +138,7 @@ def run(items, iso, dry, limit, say, seeding=frozenset()):
                                   "ok" if idx is not None else "no match", describe(tracks))
             continue
         detail = f"{describe(tracks)} → {describe(tracks, idx)}"
-        if st.st_nlink > 1 or (st.st_dev, st.st_ino) in seeding:
+        if st.st_nlink > 1 or (st.st_dev, st.st_ino) in seeding.get():
             store.set_audio_state(path, st.st_mtime, st.st_size, "seeding", detail)
             continue
         if not os.access(path, os.W_OK):
@@ -129,6 +147,10 @@ def run(items, iso, dry, limit, say, seeding=frozenset()):
         if dry:
             store.set_audio_state(path, st.st_mtime, st.st_size, "planned", detail)
             say(f"set default audio of {it['label']} to {tracks[idx]['lang']} ({detail})")
+            continue
+        if playing.get() is None or os.path.basename(path) in playing.get():
+            # Never touch a file somebody is watching (or when we cannot ask the player): next sync.
+            store.set_audio_state(path, st.st_mtime, st.st_size, "playing", detail)
             continue
         try:
             apply(path, tracks, idx)

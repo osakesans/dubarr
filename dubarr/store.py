@@ -9,6 +9,8 @@ from . import config
 
 _lock = threading.RLock()
 _conn = None
+_last_prune = 0.0
+LOG_KEEP_DAYS = 90
 
 
 def db():
@@ -30,9 +32,13 @@ def db():
 
 
 def log(msg, level="info"):
+    global _last_prune
     with _lock:
-        db().execute("INSERT INTO log VALUES(?,?,?)", (time.time(), level, msg))
-        db().execute("DELETE FROM log WHERE ts < ?", (time.time() - 90 * 86400,))
+        now = time.time()
+        db().execute("INSERT INTO log VALUES(?,?,?)", (now, level, msg))
+        if now - _last_prune > 3600:  # old lines are pruned once an hour, not on every line
+            db().execute("DELETE FROM log WHERE ts < ?", (now - LOG_KEEP_DAYS * 86400,))
+            _last_prune = now
         db().commit()
     print(f"[{level}] {msg}", flush=True)
 
@@ -64,10 +70,10 @@ def kv_set(key, value):
         db().commit()
 
 
-def last_search(app, item_id):
+def search_times(app):
+    """item id -> time of the last upgrade search Dubarr started for it."""
     with _lock:
-        r = db().execute("SELECT ts FROM searches WHERE app=? AND item_id=?", (app, item_id)).fetchone()
-        return r[0] if r else 0
+        return {r[0]: r[1] for r in db().execute("SELECT item_id, ts FROM searches WHERE app=?", (app,))}
 
 
 def mark_searched(app, ids):
@@ -88,10 +94,18 @@ def mark_seen(app, ids):
         db().commit()
 
 
-def audio_state(path):
+def audio_states():
+    """path -> {mtime, size, status, detail} for every file looked at so far, in one query."""
     with _lock:
-        r = db().execute("SELECT mtime, size, status, detail FROM audio WHERE path=?", (path,)).fetchone()
-        return dict(r) if r else None
+        return {r["path"]: {"mtime": r["mtime"], "size": r["size"], "status": r["status"], "detail": r["detail"]}
+                for r in db().execute("SELECT path, mtime, size, status, detail FROM audio")}
+
+
+def forget_audio(statuses):
+    """Drop the files with these statuses, so they are looked at again."""
+    with _lock:
+        db().execute(f"DELETE FROM audio WHERE status IN ({','.join('?' * len(statuses))})", tuple(statuses))
+        db().commit()
 
 
 def set_audio_state(path, mtime, size, status, detail=""):

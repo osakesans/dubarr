@@ -1,5 +1,6 @@
 """Dubarr engine: classify titles, keep language formats and profiles in shape, fix file languages
 from real audio tracks, search new titles, and search upgrades in small nightly batches."""
+import functools
 import hashlib
 import json
 import re
@@ -33,11 +34,12 @@ UNKNOWN_AUDIO = {"", "und", "unk", "mis", "mul", "zxx", "qaa"}
 
 
 # ---------- rules ----------
+@functools.lru_cache(maxsize=512)
 def parse_when(line):
     """'genre:animation & original:Japanese' -> [('genre', {'animation'}), ('original', {'japanese'})]"""
     line = line.strip()
     if not line or line == "*":
-        return []
+        return ()
     terms = []
     for part in line.split("&"):
         if ":" not in part:
@@ -46,8 +48,8 @@ def parse_when(line):
         k = k.strip().lower()
         if k not in ("genre", "original", "series_type"):
             raise ValueError(f"unknown rule key {k!r} (genre, original or series_type)")
-        terms.append((k, {x.strip().lower() for x in v.split("|") if x.strip()}))
-    return terms
+        terms.append((k, frozenset(x.strip().lower() for x in v.split("|") if x.strip())))
+    return tuple(terms)
 
 
 def title_info(t):
@@ -176,10 +178,10 @@ class Engine:
                        tuple(str(f.get("value")) for f in s["fields"] if f["name"] in ("value", "exceptLanguage")))
                       for s in specs)
 
-    def _sync_formats(self, cfg, arr, dry):
+    def _sync_formats(self, cfg, arr, dry, languages):
         """Create/update Dubarr's custom formats and set the scores in the managed profiles."""
         changes = []
-        lang_ids = {l["name"].lower(): l["id"] for l in arr.get("/language")}
+        lang_ids = {l["name"].lower(): l["id"] for l in languages}
         want = self._desired_formats(cfg, lang_ids)
         have = {cf["name"]: cf for cf in arr.get("/customformat")}
         for name, specs in want.items():
@@ -273,10 +275,10 @@ class Engine:
             return None
         return sorted(audio)
 
-    def _plan_app(self, cfg, arr, dry, nextarr_live):
+    def _plan_app(self, cfg, arr, dry, nextarr_live, languages, profile_list):
         app = arr.app
-        lang_ids = {l["name"].lower(): l["id"] for l in arr.get("/language")}
-        profiles = {p["id"]: p for p in arr.get("/qualityprofile")}
+        lang_ids = {l["name"].lower(): l["id"] for l in languages}
+        profiles = {p["id"]: p for p in profile_list}
         pid = {p["name"]: i for i, p in profiles.items()}
         managed = {pid[k["profile"]] for k in cfg["kinds"] if k["profile"] in pid}
         scored = managed | {pid[n] for k in cfg["kinds"] for n in k.get("also_profiles") or [] if n in pid}
@@ -323,6 +325,7 @@ class Engine:
                 row["missing"] = st.get("episodeFileCount", 0) < st.get("episodeCount", 0)
                 if not kind or not row["scored"] or not st.get("episodeFileCount"):
                     continue
+                # Two calls on purpose: /episodefile also lists files that no episode points to.
                 eps = {e["episodeFileId"]: e for e in arr.get("/episode", seriesId=t["id"]) if e.get("hasFile")}
                 cut = profiles[t["qualityProfileId"]].get("cutoffFormatScore", TOP_SCORE)
                 for f in arr.get("/episodefile", seriesId=t["id"]) or []:
@@ -366,13 +369,15 @@ class Engine:
         summary = {"last_sync": time.time(), "dry_run": dry, "nextarr_live": live_nextarr, "apps": {}}
         all_rows = []
         for app, arr in self._clients(cfg).items():
+            languages = arr.get("/language")  # read once per app and sync
             if cfg["manage_formats"]:
-                fchanges = self._sync_formats(cfg, arr, dry)
+                fchanges = self._sync_formats(cfg, arr, dry, languages)
                 self.format_plan[app] = fchanges
                 for c in fchanges:
                     self._say(dry, f"{app}:fmt:{c}", f"{app}: {c}")
-            rows = self._plan_app(cfg, arr, dry, live_nextarr)
-            self._act(cfg, arr, rows, dry, live_nextarr)
+            profile_list = arr.get("/qualityprofile")  # after the formats: their scores may just have changed
+            rows = self._plan_app(cfg, arr, dry, live_nextarr, languages, profile_list)
+            self._act(cfg, arr, rows, dry, live_nextarr, languages, profile_list)
             self.plans[app] = [r for _, _, r in rows]
             all_rows += [(t, kind, r) for t, kind, r in rows if kind and r["scored"]]
             kinds = {}
@@ -390,9 +395,9 @@ class Engine:
         self.summary = summary
         store.kv_set("heartbeat", time.time())
 
-    def _act(self, cfg, arr, rows, dry, live_nextarr):
+    def _act(self, cfg, arr, rows, dry, live_nextarr, languages, profile_list):
         app = arr.app
-        pid = {p["name"]: p["id"] for p in arr.get("/qualityprofile")}
+        pid = {p["name"]: p["id"] for p in profile_list}
         # 1. profile per kind
         if cfg["switch_profiles"]:
             for t, kind, r in rows:
@@ -404,7 +409,7 @@ class Engine:
                         r["profile"], r["switch"] = r["target"], False
         # 2. file languages from the real audio tracks
         if cfg["fix_file_languages"]:
-            lang = {l["name"].lower(): l for l in arr.get("/language")}
+            lang = {l["name"].lower(): l for l in languages}
             for t, kind, r in rows:
                 groups = {}
                 for fx in r["fixes"]:
@@ -444,9 +449,7 @@ class Engine:
         # Rules changed: look at every file again.
         fp = hashlib.sha1(json.dumps(cfg["kinds"], sort_keys=True).encode()).hexdigest()
         if store.kv_get("audio_rules") != fp:
-            with store._lock:
-                store.db().execute("DELETE FROM audio WHERE status IN ('ok','no match','planned')")
-                store.db().commit()
+            store.forget_audio(("ok", "no match", "planned"))
             store.kv_set("audio_rules", fp)
         items = []
         for t, kind, r in rows:
@@ -460,11 +463,25 @@ class Engine:
             for m in r["media"]:
                 if m["path"]:
                     items.append(dict(m, wanted=wanted))
-        seeding = audio.seeding_inodes([p for p in cfg.get("torrent_folders") or [] if p])
-        dirs, read = audio.run(items, ISO, dry, int(cfg["audio_files_per_run"]),
-                               lambda msg: self._say(dry, "audio:" + msg, msg), seeding)
-        if dirs and cfg["plex"]["url"] and cfg["plex"]["token"]:
+        plex = None
+        if cfg["plex"]["url"] and cfg["plex"]["token"]:
             plex = clients.Plex(cfg["plex"]["url"], cfg["plex"]["token"], cfg["plex"].get("verify_ssl", False))
+
+        def playing():
+            """Names of the files Plex is playing; None when Plex cannot be asked (then nothing is edited)."""
+            if not plex:
+                return frozenset()
+            try:
+                return plex.playing_files()
+            except clients.ApiError as e:
+                store.log(f"Could not ask Plex what is playing, default audio waits for the next sync: {e}", "warning")
+                return None
+
+        dirs, read = audio.run(items, ISO, dry, int(cfg["audio_files_per_run"]),
+                               lambda msg: self._say(dry, "audio:" + msg, msg),
+                               lambda: audio.seeding_inodes([p for p in cfg.get("torrent_folders") or [] if p]),
+                               playing)
+        if dirs and plex:
             for d in sorted(dirs):
                 try:
                     plex.refresh_path(d)
@@ -506,10 +523,11 @@ class Engine:
             n = int(cfg["upgrade_searches_per_night"])
             cutoff = time.time() - cfg["upgrade_retry_days"] * 86400
             for app, arr in self._clients(cfg).items():
+                searched = store.search_times(app)
                 cands = []
                 for r in self.plans.get(app, []):
                     for u in r["upgrades"]:
-                        if store.last_search(app, u["id"]) < cutoff:
+                        if searched.get(u["id"], 0) < cutoff:
                             cands.append((r, u))
                 pick = cands[:n]
                 if not pick:
@@ -526,12 +544,19 @@ class Engine:
                 store.mark_searched(app, ids)
                 store.log(f"{app}: searched upgrades for {len(pick)} of {len(cands)}: {desc}", "action")
 
+    def upgrade_due(self, cfg, now=None):
+        """True once a day, from upgrade_hour and for as long as one sync interval can last."""
+        now = now or time.time()
+        t = time.localtime(now)
+        due = time.mktime((t.tm_year, t.tm_mon, t.tm_mday, int(cfg["upgrade_hour"]), 0, 0, 0, 0, -1))
+        window = max(3600, int(cfg["sync_interval_minutes"]) * 60 + 900)
+        return due <= now < due + window and store.kv_get("last_upgrade", 0) < due
+
     def run_forever(self):
         while True:
             self.sync()
             cfg = config.load()
-            if time.localtime().tm_hour == int(cfg["upgrade_hour"]) and \
-                    time.time() - store.kv_get("last_upgrade", 0) > 20 * 3600:
+            if self.upgrade_due(cfg):
                 try:
                     self.upgrade()
                 except Exception as e:

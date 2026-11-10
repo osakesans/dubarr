@@ -46,8 +46,8 @@ DEFAULTS = {
     "switch_profiles": True,      # move titles to the profile of their kind
     "fix_file_languages": True,   # set a file's languages from its real audio tracks
     "set_default_audio": True,    # mark the best audio track as default in MKV files (for Plex)
-    "audio_files_per_run": 300,
-    "torrent_folders": [],        # where your torrent client keeps files; hard links to them are never edited   # MKV files read per sync; each is read again only when it changes
+    "audio_files_per_run": 300,   # MKV files read per sync; each is read again only when it changes
+    "torrent_folders": [],        # where your torrent client keeps files; hard links to them are never edited
     "plex": {"url": "", "token": "", "verify_ssl": False},  # optional: refresh Plex after a change
     "search_new_movies": True,    # search new Radarr movies (when Overseerr does not)
     "search_new_series": True,    # search new Sonarr series; turn off when Nextarr decides
@@ -61,6 +61,7 @@ DEFAULTS = {
 }
 
 _lock = threading.Lock()
+_cache = None  # (file signature, merged config): the file is only parsed again when it changes
 
 
 def _merge(base, override):
@@ -73,16 +74,30 @@ def _merge(base, override):
     return out
 
 
+def _signature():
+    try:
+        st = os.stat(CONFIG_PATH)
+        return (st.st_mtime_ns, st.st_size, st.st_ino)
+    except OSError:
+        return None
+
+
 def load():
+    """The current configuration. Every caller gets its own copy and may change it freely."""
+    global _cache
     with _lock:
+        sig = _signature()
+        if _cache and sig is not None and _cache[0] == sig:
+            return copy.deepcopy(_cache[1])
         data = {}
-        if os.path.exists(CONFIG_PATH):
+        if sig is not None:
             with open(CONFIG_PATH, encoding="utf-8") as f:
                 data = json.load(f)
         cfg = _merge(DEFAULTS, data)
         if not cfg["webhook_token"]:
             cfg["webhook_token"] = secrets.token_urlsafe(24)
             _write(cfg)
+        _cache = (_signature(), copy.deepcopy(cfg))
         return cfg
 
 
@@ -96,8 +111,10 @@ def _write(cfg):
 
 
 def save(cfg):
+    global _cache
     with _lock:
         _write(cfg)
+        _cache = None
 
 
 def paused():
